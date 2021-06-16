@@ -14,7 +14,7 @@ find_package(Ceres REQUIRED)
 include_directories(${CERES_INCLUDE_DIRS})
 
 #set(OpenCV_DIR $ENV{OCV4_ROOT}/lib/cmake/opencv4)
-set(OpenCV_DIR /home/yaoyu/Libraries/OpenCV/install_400/lib/cmake/opencv4)
+set(OpenCV_DIR $ENV{OPENCV_ROOT_400}/lib/cmake/opencv4)
 find_package(OpenCV REQUIRED NO_DEFAULT_PATH)
 message(STATUS "OpenCV_VERSION = ${OpenCV_VERSION}")
 message(STATUS "OpenCV_INCLUDE_DIRS = ${OpenCV_INCLUDE_DIRS}")

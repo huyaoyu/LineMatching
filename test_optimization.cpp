@@ -247,14 +247,27 @@ struct CF_SingleLine{
             : ref_lines(ref_lines), tst_line(tst_line)
             , max_dist(max_dist), weight_sigma(weight_sigma) {}
 
+    /**
+     * Homography projection. \p h contains the 9 elements of a homography matrix, in
+     * row major order. \p px and \p py are the pixel coordinated before transformation.
+     * \p ppx and \p ppy are the transformed values.
+     *
+     * @tparam rT Value type of all the floating point numbers.
+     * @param h Homography matrix.
+     * @param px x-coordinate before transformation.
+     * @param py y-coordinate before transformation.
+     * @param ppx x-coordinate after transformation.
+     * @param ppy y-coordinate after transformation.
+     */
     template < typename rT >
     void project(
             const rT* const h, const rT& px, const rT& py,
             rT& ppx, rT& ppy) const {
         ppx = h[0] * px + h[1] * py + h[2];
         ppy = h[3] * px + h[4] * py + h[5];
-        auto ppz = h[6] * px + h[7] * py + h[8];
+        const auto ppz = h[6] * px + h[7] * py + h[8];
 
+        // Homogenous coordinates.
         if ( ppz != 0.0 ) {
             ppx /= ppz;
             ppy /= ppz;
@@ -279,13 +292,9 @@ struct CF_SingleLine{
             if ( ceres::abs( slc.angle - line.angle ) > TEN_DEGREE_RAD ) continue;
 
             // Compute distance.
-            rT d = slc.point_dist( rT(line.px0), rT(line.py0) );
-            if ( d < dist ) {
-                dist = d;
-                ref_length = line.length;
-            }
+            rT d = slc.point_dist( rT(line.px0), rT(line.py0) )
+                 + slc.point_dist( rT(line.px1), rT(line.py1) );
 
-            d = slc.point_dist( rT(line.px1), rT(line.py1) );
             if ( d < dist ) {
                 dist = d;
                 ref_length = line.length;
@@ -296,9 +305,10 @@ struct CF_SingleLine{
             dist = rT(max_dist);
 
         // Weight.
-        double short_length = std::max( tst_line->length, ref_length );
+        double long_length = std::max( tst_line->length, ref_length );
         if ( weight_sigma > 0 )
-            residual[0] = dist * rT( std::exp(short_length/weight_sigma) ) ;
+//            residual[0] = dist * rT( std::exp(long_length/weight_sigma) ) ;
+            residual[0] = dist * (1 + 10 * ( 1 - std::exp(-long_length/weight_sigma) ) );
         else
             residual[0] = dist;
 
