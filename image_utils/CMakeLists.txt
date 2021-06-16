@@ -7,7 +7,6 @@ find_package(Boost REQUIRED)
 find_package(Eigen3 REQUIRED NO_MODULE)
 
 set(OpenCV_DIR $ENV{OPENCV_ROOT_400}/lib/cmake/opencv4)
-set(OpenCV_DIR /home/yaoyu/Libraries/OpenCV/install_400/lib/cmake/opencv4)
 find_package(OpenCV REQUIRED NO_DEFAULT_PATH)
 
 set(LIB_NAME ${PROJECT_NAME})
