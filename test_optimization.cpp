@@ -20,6 +20,7 @@
 #include <opencv2/line_descriptor.hpp>
 
 #include "scoped_timer.hpp"
+#include "simple_timer.hpp"
 #include "image_utils/image_utils.hpp"
 
 namespace cvline = cv::line_descriptor;
@@ -169,6 +170,10 @@ struct SimpleLine {
         return std::abs( a * px + b * py + c ) / sqrt_a2b2;;
     }
 
+    [[nodiscard]] std::pair<double, double> middle() const {
+        return { ( px0 + px1 ) / 2, ( py0 + py1 ) / 2 };
+    }
+
     double px0;
     double py0;
     double px1;
@@ -243,9 +248,11 @@ struct CF_SingleLine{
             const std::vector<SimpleLine>* ref_lines,
             const SimpleLine* tst_line,
             double max_dist,
-            double weight_sigma)
+            double weight_sigma,
+            int* best_match_index= nullptr)
             : ref_lines(ref_lines), tst_line(tst_line)
-            , max_dist(max_dist), weight_sigma(weight_sigma) {}
+            , max_dist(max_dist), weight_sigma(weight_sigma)
+            , best_match_index(best_match_index) {}
 
     /**
      * Homography projection. \p h contains the 9 elements of a homography matrix, in
@@ -287,7 +294,10 @@ struct CF_SingleLine{
         // Find the nearest line.
         rT dist = rT(MAX_D);
         double ref_length = tst_line->length;
-        for ( const auto& line : *ref_lines ) {
+        int best_index = INVALID_BEST_MATCH_INDEX;
+        for ( int i = 0; i < ref_lines->size(); i++ ) {
+            const auto& line = (*ref_lines)[i];
+
             // Check angle.
             if ( ceres::abs( slc.angle - line.angle ) > TEN_DEGREE_RAD ) continue;
 
@@ -298,64 +308,155 @@ struct CF_SingleLine{
             if ( d < dist ) {
                 dist = d;
                 ref_length = line.length;
+                best_index = i;
             }
         }
 
-        if ( dist >= max_dist )
+        if ( dist >= max_dist ) {
             dist = rT(max_dist);
-
-        // Weight.
-        double long_length = std::max( tst_line->length, ref_length );
-        if ( weight_sigma > 0 )
-//            residual[0] = dist * rT( std::exp(long_length/weight_sigma) ) ;
-            residual[0] = dist * (1 + 10 * ( 1 - std::exp(-long_length/weight_sigma) ) );
-        else
+            if ( best_match_index ) *best_match_index = INVALID_BEST_MATCH_INDEX;
             residual[0] = dist;
+        } else {
+            if (best_match_index) *best_match_index = best_index;
+
+            // Weight.
+            double long_length = std::max(tst_line->length, ref_length);
+            if (weight_sigma > 0)
+                //            residual[0] = dist * rT( std::exp(long_length/weight_sigma) ) ;
+                residual[0] = dist * (1 + 10 * (1 - std::exp(-long_length / weight_sigma)));
+            else
+                residual[0] = dist;
+        }
 
         return true;
     }
 
 private:
+    static const int INVALID_BEST_MATCH_INDEX;
     const std::vector<SimpleLine>* ref_lines;
     const SimpleLine* tst_line;
     double max_dist;
     double weight_sigma = 100;
+    int* best_match_index;
 };
+
+const int CF_SingleLine::INVALID_BEST_MATCH_INDEX = -1;
 
 static void build_op_problem(
         const std::vector<SimpleLine>& ref_lines,
         const std::vector<SimpleLine>& tst_lines,
         ceres::Problem& problem,
+        std::vector<int>& best_match_indices,
         cv::Mat& hg,
         double weight_sigma) {
+    // Clear best_match_indices.
+    const int N = tst_lines.size();
+    best_match_indices.resize(N);
+
     // Allocate solution.
     hg = cv::Mat::eye( 3, 3, CV_64FC1 );
 
     // Build the problem.
-    for ( const auto& tst_line : tst_lines ) {
+    for ( int i = 0; i < N; i++ ) {
+        const auto& tst_line = tst_lines[i];
         ceres::CostFunction* cf =
-                new ceres::AutoDiffCostFunction<CF_SingleLine, 1, 9>( new CF_SingleLine( &ref_lines, &tst_line, 20, weight_sigma ) );
+                new ceres::AutoDiffCostFunction<CF_SingleLine, 1, 9>(
+                        new CF_SingleLine( &ref_lines, &tst_line, 100, weight_sigma, &best_match_indices[i] ) );
         problem.AddResidualBlock( cf, nullptr, hg.ptr<double>() );
     }
 }
 
+static cv::Mat draw_line_correspondence(
+        const cv::Mat& ref_img,
+        const cv::Mat& tst_img,
+        const std::vector<SimpleLine>& ref_lines,
+        const std::vector<SimpleLine>& tst_lines,
+        const std::vector<int>& tst_2_ref_indices) {
+    // Assuming that the image sizes of the two images are the same.
+    const int rows = ref_img.rows;
+    const int cols = ref_img.cols;
+    assert( rows == tst_img.rows );
+    assert( cols == tst_img.cols );
+
+    // Convert image if necessary.
+    const cv::Mat img0 = iu::grey_2_BGR(ref_img);
+    const cv::Mat img1 = iu::grey_2_BGR(tst_img);
+
+    // Create the canvas.
+    cv::Mat canvas = cv::Mat::zeros(2*rows, 2*cols, CV_8UC3);
+
+    // Copy the original images to the canvas.
+    img0.copyTo( canvas( cv::Rect(    0,    0, cols, rows ) ) );
+    img1.copyTo( canvas( cv::Rect( cols,    0, cols, rows ) ) );
+    img1.copyTo( canvas( cv::Rect(    0, rows, cols, rows ) ) );
+
+    // Draw all the correspondences.
+    for ( int i = 0; i < tst_2_ref_indices.size(); i++ ) {
+        const int ref_index = tst_2_ref_indices[i];
+        if ( ref_index < 0 ) continue; // No matched correspondence.
+
+        // Get the lines.
+        const SimpleLine& ref_line = ref_lines[ref_index];
+        const SimpleLine& tst_line = tst_lines[i];
+
+        // Middle point.
+        const auto [ mp_ref_x, mp_ref_y ] = ref_line.middle();
+        const auto [ mp_tst_x, mp_tst_y ] = tst_line.middle();
+
+        // Check the angle.
+        double angle = ref_line.angle;
+        if ( angle > PI ) angle -= PI;
+
+        // Coordinate shifts for the tst entities.
+        int shift_x = 0;
+        int shift_y = 0;
+        cv::Scalar color;
+
+        if ( angle >= PI/4 && angle < 3*PI/4) {
+            // Vertical line, do left-right plot.
+            shift_x += cols;
+            color = cv::Scalar(209, 49, 31);
+        } else {
+            // Horizontal line, do top-bottom plot.
+            shift_y += rows;
+            color = cv::Scalar(18, 219, 44);
+        }
+
+        // Draw the line and the end points.
+        cv::line( canvas,
+                  cv::Point( static_cast<int>(mp_ref_x),           static_cast<int>(mp_ref_y) ),
+                  cv::Point( static_cast<int>(mp_tst_x) + shift_x, static_cast<int>(mp_tst_y) + shift_y ),
+                  color, 2 );
+        cv::circle(canvas,
+                   cv::Point( static_cast<int>(mp_ref_x), static_cast<int>(mp_ref_y) ),
+                   10,
+                   color,
+                   cv::FILLED);
+        cv::circle(canvas,
+                   cv::Point( static_cast<int>(mp_tst_x) + shift_x, static_cast<int>(mp_tst_y) + shift_y ),
+                   10,
+                   color,
+                   cv::FILLED);
+    }
+
+    return canvas;
+}
+
 static void test_lsd(
         const MatchInput& mi) {
-    cv::Mat hg;
 
-    {
-        NAMED_SCOPE_TIMER(match)
-        // Create the masks.
-        cv::Mat mask0 = cv::Mat::ones( mi.img0.size(), CV_8UC1 );
-        cv::Mat mask1 = cv::Mat::ones( mi.img0.size(), CV_8UC1 );
+    QUICK_TIME_START(match)
+    // Create the masks.
+    cv::Mat mask0 = cv::Mat::ones( mi.img0.size(), CV_8UC1 );
+    cv::Mat mask1 = cv::Mat::ones( mi.img0.size(), CV_8UC1 );
 
-        // LSD detector.
-        cv::Ptr<cvline::LSDDetector> lsd = cvline::LSDDetector::createLSDDetector();
+    // LSD detector.
+    cv::Ptr<cvline::LSDDetector> lsd = cvline::LSDDetector::createLSDDetector();
 
-        // Detect lines.
-        std::vector<cvline::KeyLine> keylines0, keylines1;
-        lsd->detect( mi.img0, keylines0, 2, 2, mask0 );
-        lsd->detect( mi.img1, keylines1, 2, 2, mask1 );
+    // Detect lines.
+    std::vector<cvline::KeyLine> keylines0, keylines1;
+    lsd->detect( mi.img0, keylines0, 2, 2, mask0 );
+    lsd->detect( mi.img1, keylines1, 2, 2, mask1 );
 
 //    // Show the info of these key lines.
 //    std::cout << "keyliens0: \n";
@@ -363,48 +464,47 @@ static void test_lsd(
 //    std::cout << "\nkeyliens1: \n";
 //    show_keyline_info( keylines1 );
 
-        std::cout << "keylines0.size() = " << keylines0.size() << "\n";
-        std::cout << "keylines1.size() = " << keylines1.size() << "\n";
+    std::cout << "keylines0.size() = " << keylines0.size() << "\n";
+    std::cout << "keylines1.size() = " << keylines1.size() << "\n";
 
-        // Filter the lines.
-        std::vector<cvline::KeyLine> filtered_lines_0, filtered_lines_1;
-        filter_keylines( keylines0, filtered_lines_0, 0, 2, mi.keyline_filter );
-        filter_keylines( keylines1, filtered_lines_1, 0, 2, mi.keyline_filter );
+    // Filter the lines.
+    std::vector<cvline::KeyLine> filtered_lines_0, filtered_lines_1;
+    filter_keylines( keylines0, filtered_lines_0, 0, 2, mi.keyline_filter );
+    filter_keylines( keylines1, filtered_lines_1, 0, 2, mi.keyline_filter );
 
-        std::cout << "filtered_lines_0.size() = " << filtered_lines_0.size() << "\n";
-        std::cout << "filtered_lines_1.size() = " << filtered_lines_1.size() << "\n";
+    // Convert the KeyLine objects.
+    std::vector<SimpleLine> simple_lines_0 = collect_and_convert_keylines( filtered_lines_0 );
+    std::vector<SimpleLine> simple_lines_1 = collect_and_convert_keylines( filtered_lines_1 );
 
-        // Draw the key lines for debugging.
-        draw_keyline_mi(mi, filtered_lines_0, filtered_lines_1);
+    // Ceres problem.
+    cv::Mat hg;
+    ceres::Problem problem;
+    std::vector<int> best_match_indices;
+    build_op_problem(
+            simple_lines_0, simple_lines_1,
+            problem, best_match_indices,
+            hg, mi.weight_sigma );
 
-        // Convert the KeyLine objects.
-        std::vector<SimpleLine> simple_lines_0 = collect_and_convert_keylines( filtered_lines_0 );
-        std::vector<SimpleLine> simple_lines_1 = collect_and_convert_keylines( filtered_lines_1 );
+    ceres::Solver::Options options;
+    options.max_num_iterations = 10000;
+    options.minimizer_progress_to_stdout = true;
+    options.num_threads = 4;
 
-        // Ceres problem.
-        ceres::Problem problem;
-        build_op_problem( simple_lines_0, simple_lines_1, problem, hg, mi.weight_sigma );
+    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
 
-        ceres::Solver::Options options;
-        options.max_num_iterations = 10000;
-        options.minimizer_progress_to_stdout = true;
-        options.num_threads = 4;
+    options.function_tolerance  = 1e-6;
+    options.gradient_tolerance  = 1e-10;
+    options.parameter_tolerance = 1e-8;
 
-        options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    ceres::Solver::Summary summary;
+    ceres::Solve( options, &problem, &summary );
+    QUICK_TIME_SHOW(match, "match in")
 
-        options.function_tolerance  = 1e-6;
-        options.gradient_tolerance  = 1e-10;
-        options.parameter_tolerance = 1e-8;
+    std::cout << summary.FullReport() << std::endl;
 
-        ceres::Solver::Summary summary;
-        ceres::Solve( options, &problem, &summary );
-
-        std::cout << summary.FullReport() << std::endl;
-
-        std::cout << "hg = \n" << hg << "\n";
-        hg /= hg.at<double>(2, 2);
-        std::cout << "hg normalized = \n" << hg << "\n";
-    }
+    std::cout << "hg = \n" << hg << "\n";
+    hg /= hg.at<double>(2, 2);
+    std::cout << "hg normalized = \n" << hg << "\n";
 
     // Convert the gray image into BGR.
     cv::Mat img0_bgr = iu::grey_2_BGR(mi.img0);
@@ -425,6 +525,30 @@ static void test_lsd(
     std::stringstream ss;
     ss << "./" << mi.name << "_merged_optimization.png";
     cv::imwrite(ss.str(), merged);
+
+    // ========== Debug use. ==========
+    std::cout << "filtered_lines_0.size() = " << filtered_lines_0.size() << "\n";
+    std::cout << "filtered_lines_1.size() = " << filtered_lines_1.size() << "\n";
+
+    // Draw the key lines for debugging.
+    draw_keyline_mi(mi, filtered_lines_0, filtered_lines_1);
+
+    // Print the best matches.
+    std::cout << "Best match indices: \n";
+    for ( int i = 0; i < best_match_indices.size(); i++ ) {
+        std::cout << i << " -> " << best_match_indices[i] << "\n";
+    }
+
+    // Draw line correspondence.
+    cv::Mat correspondence_image = draw_line_correspondence(
+            mi.img0, mi.img1,
+            simple_lines_0, simple_lines_1,
+            best_match_indices);
+
+    // Save the correspondence image.
+    ss.str(""); ss.clear();
+    ss << "./" << mi.name << "_NearestLineCorrespondence.png";
+    cv::imwrite(ss.str(), correspondence_image);
 }
 
 int main(int argc, char** argv) {
@@ -438,7 +562,9 @@ int main(int argc, char** argv) {
                           "{resize             |    -1   | the longer edge after resizing, use negative value to disable}"
                           "{filter_length      |    10   | the pixel length for filtering the key lines}"
                           "{weight_sigma       |    -1   | the weight sigma value, use negative value to disable}"
-                          "{binarise_threshold |    -1   | the threshold for binarization, use negative value to disable}");
+                          "{binarise_threshold |    -1   | the threshold for binarization, use negative value to disable}"
+                          "{contrast           |    -1   | the contrast coefficient, use negative value to disable}"
+                          "{brightness         |     0   | the added brightness, use zero to disable}");
     parser.about("Line matching by optimization.");
 
     const auto fn_img_0 = parser.get<std::string>("@template_img");
@@ -448,6 +574,8 @@ int main(int argc, char** argv) {
     const auto filter_length      = parser.get<int>("filter_length");
     const auto weight_sigma       = parser.get<double>("weight_sigma");
     const auto binarise_threshold = parser.get<int>("binarise_threshold");
+    const auto contrast           = parser.get<double>("contrast");
+    const auto brightness         = parser.get<double>("brightness");
 
     // Show the input arguments.
     std::cout << "fn_img_0: " << fn_img_0 << "\n";
@@ -482,6 +610,16 @@ int main(int argc, char** argv) {
 //    mi.read_img0("../data/0839-0001-16.jpg");
 //    mi.read_img1("../data/0839-0002-16.jpg");
 ////    mi.read_img1("../data/0839-0003-16.jpg");
+
+    if ( contrast > 0 ) {
+        mi.img0 = iu::adjust_contrast_brightness(mi.img0, contrast, brightness);
+        mi.img1 = iu::adjust_contrast_brightness(mi.img1, contrast, brightness);
+    }
+
+//    cv::resize(mi.img0, mi.img0, cv::Size(1024, 1024), 0, 0, cv::INTER_CUBIC);
+//    cv::resize(mi.img1, mi.img1, cv::Size(1024, 1024), 0, 0, cv::INTER_CUBIC);
+//    cv::resize(mi.img0, mi.img0, cv::Size(1024, 1024), 0, 0, cv::INTER_LINEAR);
+//    cv::resize(mi.img1, mi.img1, cv::Size(1024, 1024), 0, 0, cv::INTER_LINEAR);
 
     if (binarise_threshold > 0) {
         // Binaries.

@@ -18,6 +18,7 @@ namespace iu
     cv::Mat grey_2_BGR(const cv::Mat& grey);
     cv::Mat binaries(const cv::Mat& img, int threshold=10);
     cv::Mat dilate_erode(const cv::Mat& img);
+    cv::Mat adjust_contrast_brightness(const cv::Mat& img, double alpha, double beta);
 }
 
 #endif //LINEMATCHING_IMAGE_UTILS_HPP

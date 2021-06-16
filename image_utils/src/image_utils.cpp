@@ -59,4 +59,10 @@ namespace iu
         cv::erode(blurred, eroded, cv::Mat());
         return eroded;
     }
+
+    cv::Mat adjust_contrast_brightness(const cv::Mat& img, double alpha, double beta) {
+        cv::Mat out;
+        cv::convertScaleAbs(img, out, alpha, beta);
+        return out;
+    }
 }
