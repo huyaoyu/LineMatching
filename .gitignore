@@ -4,3 +4,6 @@ data/
 run/*.jpg
 run/*.png
 *.pp3
+*.zip
+run/backup_*/
+run/Backup_*/
