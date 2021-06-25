@@ -23,15 +23,15 @@ OUT_NAME_PREFIX="0056-"
 # 	-weight_sigma=-1 \
 # 	-binarise_threshold=10 \
 
-CASE=07
-$EXE \
-	${DATA_DIR}/${TEMPLATE_NAME_PREFIX}${CASE}.jpg \
-	${DATA_DIR}/${TEST_NAME_PREFIX}${CASE}.jpg \
-	-name=${OUT_NAME_PREFIX}${CASE} \
-	-resize=-1 \
-	-filter_length=30 \
-	-weight_sigma=-1 \
-	-binarise_threshold=10 \
+# CASE=07
+# $EXE \
+# 	${DATA_DIR}/${TEMPLATE_NAME_PREFIX}${CASE}.jpg \
+# 	${DATA_DIR}/${TEST_NAME_PREFIX}${CASE}.jpg \
+# 	-name=${OUT_NAME_PREFIX}${CASE} \
+# 	-resize=-1 \
+# 	-filter_length=30 \
+# 	-weight_sigma=-1 \
+# 	-binarise_threshold=10 \
 
 # CASE=08
 # $EXE \
@@ -55,15 +55,15 @@ $EXE \
 # 	-brightness=0.0 \
 # 	-binarise_threshold=10 \
 
-# CASE=13
-# $EXE \
-# 	${DATA_DIR}/${TEMPLATE_NAME_PREFIX}${CASE}.jpg \
-# 	${DATA_DIR}/${TEST_NAME_PREFIX}${CASE}.jpg \
-# 	-name=${OUT_NAME_PREFIX}${CASE} \
-# 	-resize=1024 \
-# 	-filter_length=50 \
-# 	-weight_sigma=500 \
-# 	-binarise_threshold=10 \
+CASE=13
+$EXE \
+	${DATA_DIR}/${TEMPLATE_NAME_PREFIX}${CASE}.jpg \
+	${DATA_DIR}/${TEST_NAME_PREFIX}${CASE}.jpg \
+	-name=${OUT_NAME_PREFIX}${CASE} \
+	-resize=1024 \
+	-filter_length=50 \
+	-weight_sigma=800 \
+	-binarise_threshold=10 \
 
 # CASE=14
 # $EXE \

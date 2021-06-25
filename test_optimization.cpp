@@ -2,29 +2,34 @@
 // Created by yaoyu on 6/1/21.
 //
 
+// ========== C++ standard headers. ==========
 #include <iostream>
 #include <limits>
 #include <string>
 
+// ========== Third-party headers. ==========
+// Boost.
 #include <boost/math/constants/constants.hpp>
 
+// Ceres.
 #include <ceres/ceres.h>
 #include <glog/logging.h>
 
-#include <opencv2/calib3d.hpp>
+// OpenCV.
 #include <opencv2/core.hpp>
 #include <opencv2/core/utility.hpp>
-#include <opencv2/features2d.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/line_descriptor.hpp>
 
-#include "scoped_timer.hpp"
+// ========== Project headers. ==========
 #include "simple_timer.hpp"
 #include "image_utils/image_utils.hpp"
 
+// ========== Name space alias. ==========
 namespace cvline = cv::line_descriptor;
 
+// Globals.
 const auto PI = boost::math::constants::pi<double>();
 const auto TEN_DEGREE_RAD = 10.0 / 180 * PI;
 const auto MAX_D = std::numeric_limits<double>::max();
@@ -32,6 +37,14 @@ const auto MAX_D = std::numeric_limits<double>::max();
 const int NO_RESIZE = -1;
 const double NO_WEIGHT_SIGMA = -1.;
 
+/**
+ * Read and resize an image. The resize is done by scale the longer edge to the value
+ * specified by \p longer_edge.
+ *
+ * @param fn Image filename.
+ * @param longer_edge Length of the resized longer edge. Use a non-positive value to disable.
+ * @return resized image.
+ */
 static cv::Mat read_resize(const std::string& fn, int longer_edge=1024) {
     // Read the image.
     cv::Mat img = iu::read_image(fn);
@@ -44,6 +57,9 @@ static cv::Mat read_resize(const std::string& fn, int longer_edge=1024) {
     }
 }
 
+/**
+ * A convenient representation of the input data.
+ */
 struct MatchInput {
     MatchInput( const std::string& name,
                 int resize_longer_edge=NO_RESIZE,
@@ -62,14 +78,18 @@ struct MatchInput {
         img1 = read_resize(fn, resize_longer_edge);
     }
 
-    cv::Mat img0;
-    cv::Mat img1;
-    std::string name;
-    int resize_longer_edge;
-    int keyline_filter;
-    double weight_sigma;
+    cv::Mat img0;           // The reference/target/training image.
+    cv::Mat img1;           // The test/source image.
+    std::string name;       // Name of this input case.
+    int resize_longer_edge; // Target longer edge length after resizing.
+    int keyline_filter;     // Minimum length of a keyline.
+    double weight_sigma;    // The weight coefficient of the loss function.
 };
 
+/**
+ * Print some info of a collection of keylines.
+ * @param keylines
+ */
 static void show_keyline_info(const std::vector<cvline::KeyLine>& keylines) {
     const int N = keylines.size();
 
@@ -90,16 +110,25 @@ static void show_keyline_info(const std::vector<cvline::KeyLine>& keylines) {
         std::cout << "length_xy = " << length_xy << "\n";
     }
 }
+
+/**
+ * Filter keylines by the octave and length.
+ * @param keylines A collection of keylines.
+ * @param filtered_keylines Output keylines.
+ * @param octave Octave number.
+ * @param scale Scale between octaves.
+ * @param length Length threshold.
+ */
 static void filter_keylines(
         const std::vector<cvline::KeyLine>& keylines,
         std::vector<cvline::KeyLine>& filtered_keylines,
         int octave,
         float scale,
         float length) {
+    // Scale factor of the target octave.
     const float scale_octave = std::pow( scale, octave );
 
-    for ( int i = 0; i < keylines.size(); i++ ) {
-        const auto& keyline = keylines[i];
+    for( const auto& keyline : keylines) {
         if ( keyline.octave == octave ) {
             if ( keyline.lineLength * scale_octave >= length ) {
                 filtered_keylines.push_back( keyline );
@@ -108,6 +137,12 @@ static void filter_keylines(
     }
 }
 
+/**
+ * Draw keylines on an image.
+ * @param img The original image.
+ * @param keylines A collection of keylines.
+ * @return A new image with keylines drawn.
+ */
 static cv::Mat draw_keylines(
         const cv::Mat img,
         const std::vector<cvline::KeyLine>& keylines) {
@@ -127,20 +162,30 @@ static cv::Mat draw_keylines(
     return img_lines;
 }
 
+/**
+ * Draw keylines on both of the reference and test images.
+ * @param mi An object contains the images.
+ * @param key_lines_0 Keylines on the reference image.
+ * @param key_lines_1 Keylines on the test image.
+ */
 static void draw_keyline_mi(
         const MatchInput& mi,
-        const std::vector<cvline::KeyLine>& filtered_lines_0,
-        const std::vector<cvline::KeyLine>& filtered_lines_1) {
-    cv::Mat img0_lines = draw_keylines(mi.img0, filtered_lines_0);
-    cv::Mat img1_lines = draw_keylines(mi.img1, filtered_lines_1);
+        const std::vector<cvline::KeyLine>& key_lines_0,
+        const std::vector<cvline::KeyLine>& key_lines_1) {
+    cv::Mat img0_lines = draw_keylines(mi.img0, key_lines_0);
     std::stringstream ss;
     ss << "./" << mi.name << "_img0_lines.png";
     cv::imwrite( ss.str(), img0_lines );
+
+    cv::Mat img1_lines = draw_keylines(mi.img1, key_lines_1);
     ss.str(""); ss.clear();
     ss << "./" << mi.name << "_img1_lines.png";
     cv::imwrite( ss.str(), img1_lines );
 }
 
+/**
+ * A representation of a 2D line.
+ */
 struct SimpleLine {
     SimpleLine(double px0, double py0, double px1, double py1)
     : px0{px0}, py0{py0}, px1{px1}, py1{py1}
@@ -163,29 +208,44 @@ struct SimpleLine {
 
         angle = std::atan2( dy, dx );
         angle = angle < 0 ? angle + PI : angle;
+
         length = std::sqrt( dx * dx + dy * dy );
     }
 
+    /**
+     * Compute the distance from a point to the current line.
+     * @param px x-coordinate.
+     * @param py y-coordinate.
+     * @return distacne.
+     */
     [[nodiscard]] double point_dist( double px, double py ) const {
         return std::abs( a * px + b * py + c ) / sqrt_a2b2;;
     }
 
+    /**
+     * Return the middle point coordinate.
+     * @return x, y coordinate.
+     */
     [[nodiscard]] std::pair<double, double> middle() const {
         return { ( px0 + px1 ) / 2, ( py0 + py1 ) / 2 };
     }
 
-    double px0;
-    double py0;
-    double px1;
-    double py1;
-    double a;
+    double px0; // x-coordinate of the first point.
+    double py0; // y-coordinate of the first point.
+    double px1; // x-coordinate of the second point.
+    double py1; // y-coordinate of the second point.
+    double a;   // Line coefficients.
     double b;
     double c;
-    double sqrt_a2b2;
-    double angle;
-    double length;
+    double sqrt_a2b2; // Intermediate value.
+    double angle;     // Angle with respect to the x-axis. Radian.
+    double length;    // Length of the line.
 };
 
+/**
+ * A line representation for Ceres, similar to \ref SimpleLine.
+ * @tparam rT Data type determined by Ceres.
+ */
 template < typename rT >
 struct SimpleLineCeres {
     SimpleLineCeres(const rT& px0, const rT& py0, const rT& px1, const rT& py1)
@@ -229,6 +289,11 @@ struct SimpleLineCeres {
     rT length;
 };
 
+/**
+ * Convert a set of keylines to SimpleLine objects.
+ * @param key_lines Input keylines.
+ * @return SimpleLine objects.
+ */
 static std::vector<SimpleLine> collect_and_convert_keylines(
         const std::vector<cvline::KeyLine>& key_lines) {
     std::vector<SimpleLine> simple_lines;
@@ -243,6 +308,9 @@ static std::vector<SimpleLine> collect_and_convert_keylines(
     return simple_lines;
 }
 
+/**
+ * Cost function for Ceres.
+ */
 struct CF_SingleLine{
     CF_SingleLine(
             const std::vector<SimpleLine>* ref_lines,
@@ -281,6 +349,13 @@ struct CF_SingleLine{
         }
     }
 
+    /**
+     * Compute the residual for the optimization.
+     * @tparam rT Data type determined by Ceres.
+     * @param h Optimization target.
+     * @param residual Residual
+     * @return Always true.
+     */
     template < typename rT >
     bool operator () ( const rT* const h, rT* residual ) const {
         // Project the end points.
@@ -333,15 +408,25 @@ struct CF_SingleLine{
 
 private:
     static const int INVALID_BEST_MATCH_INDEX;
-    const std::vector<SimpleLine>* ref_lines;
-    const SimpleLine* tst_line;
-    double max_dist;
-    double weight_sigma = 100;
-    int* best_match_index;
+    const std::vector<SimpleLine>* ref_lines; // The reference lines.
+    const SimpleLine* tst_line;               // A test line.
+    double max_dist;                          // Distance threshold for cost clipping.
+    double weight_sigma = 100;                // Weight coefficient.
+    int* best_match_index;                    // Line index of the best matching reference line.
 };
 
+// Create the static const member of CF_SingleLine.
 const int CF_SingleLine::INVALID_BEST_MATCH_INDEX = -1;
 
+/**
+ * Build the optimization problem.
+ * @param ref_lines A collection of lines in the reference image.
+ * @param tst_lines A collection of lines in the test image.
+ * @param problem The optimization problem.
+ * @param best_match_indices The resulting best matching reference line indices.
+ * @param hg The 3x3 homography matrix.
+ * @param weight_sigma Weight coefficient.
+ */
 static void build_op_problem(
         const std::vector<SimpleLine>& ref_lines,
         const std::vector<SimpleLine>& tst_lines,
@@ -366,6 +451,16 @@ static void build_op_problem(
     }
 }
 
+/**
+ * Draw line correspondences between two images. The horizontal lines will be marked in green. And blue
+ * for the vertical lines.
+ * @param ref_img Reference/target/training image.
+ * @param tst_img Test/source image.
+ * @param ref_lines Lines in the reference image.
+ * @param tst_lines Lines in the test image.
+ * @param tst_2_ref_indices Best matching reference line indices.
+ * @return A new image showing the line correspondences.
+ */
 static cv::Mat draw_line_correspondence(
         const cv::Mat& ref_img,
         const cv::Mat& tst_img,
@@ -442,7 +537,11 @@ static cv::Mat draw_line_correspondence(
     return canvas;
 }
 
-static void test_lsd(
+/**
+ * Test LSD line detector and optimization based line matching.
+ * @param mi The model input.
+ */
+static void test_lsd_optimization(
         const MatchInput& mi) {
 
     QUICK_TIME_START(match)
@@ -472,7 +571,7 @@ static void test_lsd(
     filter_keylines( keylines0, filtered_lines_0, 0, 2, mi.keyline_filter );
     filter_keylines( keylines1, filtered_lines_1, 0, 2, mi.keyline_filter );
 
-    // Convert the KeyLine objects.
+    // Convert the KeyLine objects to SimpleLine objects.
     std::vector<SimpleLine> simple_lines_0 = collect_and_convert_keylines( filtered_lines_0 );
     std::vector<SimpleLine> simple_lines_1 = collect_and_convert_keylines( filtered_lines_1 );
 
@@ -485,6 +584,7 @@ static void test_lsd(
             problem, best_match_indices,
             hg, mi.weight_sigma );
 
+    // Configure the solver.
     ceres::Solver::Options options;
     options.max_num_iterations = 10000;
     options.minimizer_progress_to_stdout = true;
@@ -496,13 +596,18 @@ static void test_lsd(
     options.gradient_tolerance  = 1e-10;
     options.parameter_tolerance = 1e-8;
 
+    // Solve.
     ceres::Solver::Summary summary;
     ceres::Solve( options, &problem, &summary );
     QUICK_TIME_SHOW(match, "match in")
 
+    // Show solution details.
     std::cout << summary.FullReport() << std::endl;
 
+    // Show the raw homography matrix.
     std::cout << "hg = \n" << hg << "\n";
+
+    // Normalize the homography matrix.
     hg /= hg.at<double>(2, 2);
     std::cout << "hg normalized = \n" << hg << "\n";
 
@@ -514,6 +619,7 @@ static void test_lsd(
     cv::Mat warped;
     cv::warpPerspective( img1_bgr, warped, hg, cv::Size( img0_bgr.cols, img0_bgr.rows ), cv::INTER_CUBIC);
 
+    // Merge images.
     cv::Mat dummy = warped.clone();
     dummy.setTo(cv::Scalar(0, 1, 0));
     cv::Mat green;
@@ -590,36 +696,10 @@ int main(int argc, char** argv) {
     mi.read_img0(fn_img_0);
     mi.read_img1(fn_img_1);
 
-//    MatchInput mi("0002-05", resize_longer_edge, filter_length, weight_sigma);
-//    mi.read_img0(fn_img_0);
-//    mi.read_img1(fn_img_1);
-
-//    MatchInput mi("0002-08", 1024, 30);
-//    mi.read_img0("../data/0839-0001-08.jpg");
-//    mi.read_img1("../data/0839-0002-08.jpg");
-
-//    MatchInput mi("0002-13", 1024, 30);
-//    mi.read_img0("../data/0839-0001-13.jpg");
-//    mi.read_img1("../data/0839-0002-13.jpg");
-
-//    MatchInput mi("0002-14", 1024, 0, 100);
-//    mi.read_img0("../data/0839-0001-14.jpg");
-//    mi.read_img1("../data/0839-0002-14.jpg");
-
-//    MatchInput mi("0002-16", 1024, 30, 100);
-//    mi.read_img0("../data/0839-0001-16.jpg");
-//    mi.read_img1("../data/0839-0002-16.jpg");
-////    mi.read_img1("../data/0839-0003-16.jpg");
-
     if ( contrast > 0 ) {
         mi.img0 = iu::adjust_contrast_brightness(mi.img0, contrast, brightness);
         mi.img1 = iu::adjust_contrast_brightness(mi.img1, contrast, brightness);
     }
-
-//    cv::resize(mi.img0, mi.img0, cv::Size(1024, 1024), 0, 0, cv::INTER_CUBIC);
-//    cv::resize(mi.img1, mi.img1, cv::Size(1024, 1024), 0, 0, cv::INTER_CUBIC);
-//    cv::resize(mi.img0, mi.img0, cv::Size(1024, 1024), 0, 0, cv::INTER_LINEAR);
-//    cv::resize(mi.img1, mi.img1, cv::Size(1024, 1024), 0, 0, cv::INTER_LINEAR);
 
     if (binarise_threshold > 0) {
         // Binaries.
@@ -635,8 +715,8 @@ int main(int argc, char** argv) {
         cv::GaussianBlur(mi.img1, mi.img1, cv::Size(3, 3), 0, 0, cv::BORDER_DEFAULT);
     }
 
-    // LSD.
-    test_lsd(mi);
+    // LSD and optimization.
+    test_lsd_optimization(mi);
 
     return 0;
 }
