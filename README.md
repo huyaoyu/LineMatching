@@ -14,3 +14,4 @@ This project is an ordinary CMake project. Use `-DCMAKE_BUILD_TYPE=Release` to b
 
 ## Simple test
 A sample test script is saved at `/run/run.sh`. Please copy it to a new location and modify the settings to reflect the correct sample data setting.
+`/run/run.sh` will test the `test_optimization` target.
